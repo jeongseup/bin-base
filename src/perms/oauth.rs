@@ -187,7 +187,18 @@ impl Authenticator {
                     }
                     let source_chain = source_chain.join("\n\n Caused by: \n");
 
-                    error!(%err, %source_chain, "Failed to refresh oauth token");
+                    let token_url = self.config.oauth_token_url.as_str();
+                    let client_id = &self.config.oauth_client_id;
+                    let audience = &self.config.oauth_audience;
+
+                    error!(
+                        %err,
+                        %source_chain,
+                        token_url,
+                        client_id,
+                        audience,
+                        "Failed to refresh oauth token"
+                    );
                 }
             };
             let _sleep = tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
