@@ -51,6 +51,12 @@ pub struct OAuthConfig {
         desc = "The oauth token refresh interval in seconds"
     )]
     pub oauth_token_refresh_interval: u64,
+    /// OAuth audience for the token request.
+    #[from_env(
+        var = "OAUTH_AUDIENCE",
+        desc = "OAuth audience for the token request"
+    )]
+    pub oauth_audience: String,
 }
 
 impl OAuthConfig {
@@ -146,6 +152,7 @@ impl Authenticator {
         let token_result = self
             .client
             .exchange_client_credentials()
+            .add_extra_param("audience", &self.config.oauth_audience)
             .request_async(&self.reqwest)
             .await?;
 
@@ -361,5 +368,204 @@ impl<'a> TokenRef<'a> {
     /// Get a reference to the scopes associated with the token, if any.
     pub fn scopes(&self) -> Option<&Vec<Scope>> {
         self.inner().scopes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a test OAuthConfig with a fake token URL.
+    /// The secret must be injected via `OAUTH_CLIENT_SECRET` env var before
+    /// calling `from_env`, or you can use this helper which sets a dummy value.
+    fn test_config(token_url: &str) -> OAuthConfig {
+        OAuthConfig {
+            oauth_client_id: "radius-builder".to_string(),
+            oauth_client_secret: "test-secret".to_string(),
+            oauth_authenticate_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                .parse()
+                .unwrap(),
+            oauth_token_url: token_url.parse().unwrap(),
+            oauth_token_refresh_interval: 60,
+            oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
+        }
+    }
+
+    fn real_config() -> OAuthConfig {
+        test_config(
+            "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token",
+        )
+    }
+
+    #[test]
+    fn authenticator_starts_unauthenticated() {
+        let config = real_config();
+        let auth = config.authenticator();
+
+        assert!(!auth.is_authenticated());
+    }
+
+    #[test]
+    fn shared_token_empty_is_not_authenticated() {
+        let token = SharedToken::empty();
+        assert!(!token.is_authenticated());
+    }
+
+    #[test]
+    fn authenticator_produces_shared_token() {
+        let config = real_config();
+        let auth = config.authenticator();
+        let token = auth.token();
+
+        // Token should start as not authenticated
+        assert!(!token.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn authenticate_fails_with_invalid_token_url() {
+        // Use a URL that will refuse connection to trigger the error path
+        let config = test_config("http://127.0.0.1:1/token");
+        let auth = config.authenticator();
+
+        let result = auth.authenticate().await;
+        assert!(result.is_err(), "authenticate should fail with unreachable token URL");
+
+        // Verify the error has a source chain (the nested error behavior
+        // that task_future logs)
+        let err = result.unwrap_err();
+        let mut current = &err as &dyn Error;
+        let mut source_chain = Vec::new();
+        while let Some(source) = current.source() {
+            source_chain.push(source.to_string());
+            current = source;
+        }
+
+        assert!(
+            !source_chain.is_empty(),
+            "error should have a source chain for debugging, got top-level: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_fails_with_bad_credentials() {
+        // Use the real token URL but with dummy credentials — should get an
+        // OAuth error response (not a connection error).
+        let config = real_config();
+        let auth = config.authenticator();
+
+        let result = auth.authenticate().await;
+        assert!(
+            result.is_err(),
+            "authenticate should fail with invalid credentials"
+        );
+
+        // Token should remain unset after failed auth
+        assert!(!auth.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn task_future_does_not_panic_on_auth_error() {
+        // Verify the refresh loop handles errors gracefully (no panic).
+        // Use a short interval and an unreachable URL.
+        let mut config = test_config("http://127.0.0.1:1/token");
+        config.oauth_token_refresh_interval = 1;
+
+        let auth = config.authenticator();
+        let token = auth.token();
+
+        let handle = auth.spawn();
+
+        // Let the loop run through at least one iteration
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // The task should still be running (not panicked)
+        assert!(!handle.is_finished(), "task_future should not panic on auth errors");
+
+        // Token should remain unauthenticated
+        assert!(!token.is_authenticated());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_token_secret_returns_error_when_sender_dropped() {
+        // When the Authenticator (sender) is dropped without ever setting a
+        // token, secret() should return a RecvError.
+        let token = SharedToken::empty();
+
+        let result = token.secret().await;
+        assert!(
+            result.is_err(),
+            "secret() should return RecvError when sender is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_token_secret_blocks_until_token_available() {
+        // When a sender exists but hasn't sent a token yet, secret()
+        // should block indefinitely — verify via timeout.
+        let config = real_config();
+        let auth = config.authenticator();
+        let token = auth.token();
+
+        // auth is alive but hasn't authenticated — secret() should not resolve
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            token.secret(),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "secret() should block when no token has been set yet"
+        );
+    }
+
+    /// Integration test that authenticates with real credentials.
+    /// Run with: OAUTH_CLIENT_SECRET=실제시크릿 cargo test --features perms -- perms::oauth::tests::authenticate_succeeds_with_real_credentials --ignored
+    #[tokio::test]
+    #[ignore = "requires OAUTH_CLIENT_SECRET env var with valid credentials"]
+    async fn authenticate_succeeds_with_real_credentials() {
+        let secret = std::env::var("OAUTH_CLIENT_SECRET")
+            .expect("OAUTH_CLIENT_SECRET must be set for this test");
+
+        let config = OAuthConfig {
+            oauth_client_id: "radius-builder".to_string(),
+            oauth_client_secret: secret,
+            oauth_authenticate_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                .parse()
+                .unwrap(),
+            oauth_token_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token"
+                .parse()
+                .unwrap(),
+            oauth_token_refresh_interval: 60,
+            oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
+        };
+
+        let auth = config.authenticator();
+        let result = auth.authenticate().await;
+
+        assert!(result.is_ok(), "authenticate should succeed: {:?}", result.err());
+        assert!(auth.is_authenticated(), "should be authenticated after successful auth");
+
+        // Inspect the token response
+        let mut shared = auth.token();
+        let token_ref = shared.token().await.expect("token should be available");
+
+        let access_token = token_ref.access_token().secret();
+        let token_type = token_ref.token_type();
+        let expires_in = token_ref.expires_in();
+        let scopes = token_ref.scopes();
+        let refresh_token = token_ref.refresh_token().map(|t| t.secret());
+
+        println!("\n========== OAuth Token Response ==========");
+        println!("access_token: {}...{}", &access_token[..20], &access_token[access_token.len().saturating_sub(20)..]);
+        println!("token_type:   {:?}", token_type);
+        println!("expires_in:   {:?}", expires_in);
+        println!("scopes:       {:?}", scopes);
+        println!("refresh_token: {}", refresh_token.map_or("None".to_string(), |t| format!("{}...", &t[..20.min(t.len())])));
+        println!("==========================================\n");
+
+        assert!(!access_token.is_empty(), "token secret should not be empty");
     }
 }
