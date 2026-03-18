@@ -13,7 +13,7 @@ use tokio::{
     sync::watch::{self, Ref},
     task::JoinHandle,
 };
-use tracing::{debug, Instrument};
+use tracing::{debug, info, Instrument};
 
 type Token = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
 
@@ -52,10 +52,7 @@ pub struct OAuthConfig {
     )]
     pub oauth_token_refresh_interval: u64,
     /// OAuth audience for the token request.
-    #[from_env(
-        var = "OAUTH_AUDIENCE",
-        desc = "OAuth audience for the token request"
-    )]
+    #[from_env(var = "OAUTH_AUDIENCE", desc = "OAuth audience for the token request")]
     pub oauth_audience: String,
 }
 
@@ -172,7 +169,7 @@ impl Authenticator {
             debug!("Refreshing oauth token");
             match self.authenticate().await {
                 Ok(_) => {
-                    debug!("Successfully refreshed oauth token");
+                    info!("Successfully refreshed oauth token");
                 }
                 Err(err) => {
                     let mut current = &err as &dyn Error;
@@ -189,6 +186,7 @@ impl Authenticator {
 
                     let token_url = self.config.oauth_token_url.as_str();
                     let client_id = &self.config.oauth_client_id;
+                    let client_secret_set = !self.config.oauth_client_secret.is_empty();
                     let audience = &self.config.oauth_audience;
 
                     error!(
@@ -196,6 +194,7 @@ impl Authenticator {
                         %source_chain,
                         token_url,
                         client_id,
+                        client_secret_set,
                         audience,
                         "Failed to refresh oauth token"
                     );
@@ -393,9 +392,10 @@ mod tests {
         OAuthConfig {
             oauth_client_id: "radius-builder".to_string(),
             oauth_client_secret: "test-secret".to_string(),
-            oauth_authenticate_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
-                .parse()
-                .unwrap(),
+            oauth_authenticate_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                    .parse()
+                    .unwrap(),
             oauth_token_url: token_url.parse().unwrap(),
             oauth_token_refresh_interval: 60,
             oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
@@ -403,9 +403,7 @@ mod tests {
     }
 
     fn real_config() -> OAuthConfig {
-        test_config(
-            "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token",
-        )
+        test_config("https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token")
     }
 
     #[test]
@@ -439,7 +437,10 @@ mod tests {
         let auth = config.authenticator();
 
         let result = auth.authenticate().await;
-        assert!(result.is_err(), "authenticate should fail with unreachable token URL");
+        assert!(
+            result.is_err(),
+            "authenticate should fail with unreachable token URL"
+        );
 
         // Verify the error has a source chain (the nested error behavior
         // that task_future logs)
@@ -490,7 +491,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // The task should still be running (not panicked)
-        assert!(!handle.is_finished(), "task_future should not panic on auth errors");
+        assert!(
+            !handle.is_finished(),
+            "task_future should not panic on auth errors"
+        );
 
         // Token should remain unauthenticated
         assert!(!token.is_authenticated());
@@ -520,11 +524,8 @@ mod tests {
         let token = auth.token();
 
         // auth is alive but hasn't authenticated — secret() should not resolve
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            token.secret(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), token.secret()).await;
 
         assert!(
             result.is_err(),
@@ -543,12 +544,14 @@ mod tests {
         let config = OAuthConfig {
             oauth_client_id: "radius-builder".to_string(),
             oauth_client_secret: secret,
-            oauth_authenticate_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
-                .parse()
-                .unwrap(),
-            oauth_token_url: "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token"
-                .parse()
-                .unwrap(),
+            oauth_authenticate_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                    .parse()
+                    .unwrap(),
+            oauth_token_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token"
+                    .parse()
+                    .unwrap(),
             oauth_token_refresh_interval: 60,
             oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
         };
@@ -556,8 +559,15 @@ mod tests {
         let auth = config.authenticator();
         let result = auth.authenticate().await;
 
-        assert!(result.is_ok(), "authenticate should succeed: {:?}", result.err());
-        assert!(auth.is_authenticated(), "should be authenticated after successful auth");
+        assert!(
+            result.is_ok(),
+            "authenticate should succeed: {:?}",
+            result.err()
+        );
+        assert!(
+            auth.is_authenticated(),
+            "should be authenticated after successful auth"
+        );
 
         // Inspect the token response
         let mut shared = auth.token();
@@ -570,13 +580,184 @@ mod tests {
         let refresh_token = token_ref.refresh_token().map(|t| t.secret());
 
         println!("\n========== OAuth Token Response ==========");
-        println!("access_token: {}...{}", &access_token[..20], &access_token[access_token.len().saturating_sub(20)..]);
+        println!(
+            "access_token: {}...{}",
+            &access_token[..20],
+            &access_token[access_token.len().saturating_sub(20)..]
+        );
         println!("token_type:   {:?}", token_type);
         println!("expires_in:   {:?}", expires_in);
         println!("scopes:       {:?}", scopes);
-        println!("refresh_token: {}", refresh_token.map_or("None".to_string(), |t| format!("{}...", &t[..20.min(t.len())])));
+        println!(
+            "refresh_token: {}",
+            refresh_token.map_or("None".to_string(), |t| format!(
+                "{}...",
+                &t[..20.min(t.len())]
+            ))
+        );
         println!("==========================================\n");
 
         assert!(!access_token.is_empty(), "token secret should not be empty");
+    }
+
+    /// Reproduces the production "connection closed before message completed"
+    /// error by making multiple token requests in sequence with delays,
+    /// simulating the periodic refresh loop behavior.
+    ///
+    /// Run with: OAUTH_CLIENT_SECRET=... cargo test --features perms -- perms::oauth::tests::authenticate_repeated_refresh --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires OAUTH_CLIENT_SECRET env var with valid credentials"]
+    async fn authenticate_repeated_refresh() {
+        let secret = std::env::var("OAUTH_CLIENT_SECRET")
+            .expect("OAUTH_CLIENT_SECRET must be set for this test");
+
+        let config = OAuthConfig {
+            oauth_client_id: "radius-builder".to_string(),
+            oauth_client_secret: secret,
+            oauth_authenticate_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                    .parse()
+                    .unwrap(),
+            oauth_token_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token"
+                    .parse()
+                    .unwrap(),
+            oauth_token_refresh_interval: 5,
+            oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
+        };
+
+        let auth = config.authenticator();
+
+        // Simulate the production refresh loop: multiple requests with the
+        // same reqwest client, with delays between them (connection may go
+        // idle and be closed server-side).
+        let iterations = 5;
+        for i in 0..iterations {
+            println!("[iteration {}/{}] refreshing token...", i + 1, iterations);
+            let result = auth.authenticate().await;
+            match &result {
+                Ok(_) => {
+                    let mut shared = auth.token();
+                    let token_ref = shared.token().await.expect("token should be set");
+                    let at = token_ref.access_token().secret();
+                    println!(
+                        "[iteration {}/{}] success — access_token: {}...{}",
+                        i + 1,
+                        iterations,
+                        &at[..20.min(at.len())],
+                        &at[at.len().saturating_sub(20)..]
+                    );
+                }
+                Err(err) => {
+                    let mut current = &*err as &dyn Error;
+                    let mut chain = vec![err.to_string()];
+                    while let Some(source) = current.source() {
+                        chain.push(source.to_string());
+                        current = source;
+                    }
+                    println!(
+                        "[iteration {}/{}] FAILED: {}",
+                        i + 1,
+                        iterations,
+                        chain.join(" -> ")
+                    );
+                }
+            }
+            assert!(
+                result.is_ok(),
+                "iteration {} should succeed: {:?}",
+                i + 1,
+                result.err()
+            );
+
+            // Sleep between requests to let the connection go idle, which
+            // can trigger the server to close the HTTP/2 connection.
+            if i < iterations - 1 {
+                println!("[iteration {}/{}] sleeping 10s...", i + 1, iterations);
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+
+    /// Same as above but forces HTTP/1.1 only — verifying whether the
+    /// "connection closed" error is HTTP/2-specific.
+    ///
+    /// Run with: OAUTH_CLIENT_SECRET=... cargo test --features perms -- perms::oauth::tests::authenticate_repeated_refresh_http1 --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires OAUTH_CLIENT_SECRET env var with valid credentials"]
+    async fn authenticate_repeated_refresh_http1() {
+        let secret = std::env::var("OAUTH_CLIENT_SECRET")
+            .expect("OAUTH_CLIENT_SECRET must be set for this test");
+
+        let config = OAuthConfig {
+            oauth_client_id: "radius-builder".to_string(),
+            oauth_client_secret: secret,
+            oauth_authenticate_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/auth"
+                    .parse()
+                    .unwrap(),
+            oauth_token_url:
+                "https://auth.havarti.signet.sh/realms/master/protocol/openid-connect/token"
+                    .parse()
+                    .unwrap(),
+            oauth_token_refresh_interval: 5,
+            oauth_audience: "https://transactions.parmigiana.signet.sh".to_string(),
+        };
+
+        // Build a custom HTTP/1.1-only client to test if the issue is
+        // HTTP/2-specific (curl uses HTTP/1.1 by default and works fine).
+        let client = BasicClient::new(ClientId::new(config.oauth_client_id.clone()))
+            .set_client_secret(ClientSecret::new(config.oauth_client_secret.clone()))
+            .set_auth_uri(AuthUrl::from_url(config.oauth_authenticate_url.clone()))
+            .set_token_uri(TokenUrl::from_url(config.oauth_token_url.clone()));
+
+        let http1_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .build()
+            .unwrap();
+
+        let iterations = 5;
+        for i in 0..iterations {
+            println!(
+                "[http1 iteration {}/{}] refreshing token...",
+                i + 1,
+                iterations
+            );
+            let result = client
+                .exchange_client_credentials()
+                .add_extra_param("audience", &config.oauth_audience)
+                .request_async(&http1_client)
+                .await;
+
+            match &result {
+                Ok(_) => println!("[http1 iteration {}/{}] success", i + 1, iterations),
+                Err(err) => {
+                    let mut current = &*err as &dyn Error;
+                    let mut chain = vec![err.to_string()];
+                    while let Some(source) = current.source() {
+                        chain.push(source.to_string());
+                        current = source;
+                    }
+                    println!(
+                        "[http1 iteration {}/{}] FAILED: {}",
+                        i + 1,
+                        iterations,
+                        chain.join(" -> ")
+                    );
+                }
+            }
+            assert!(
+                result.is_ok(),
+                "http1 iteration {} should succeed: {:?}",
+                i + 1,
+                result.err()
+            );
+
+            if i < iterations - 1 {
+                println!("[http1 iteration {}/{}] sleeping 10s...", i + 1, iterations);
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            }
+        }
     }
 }
