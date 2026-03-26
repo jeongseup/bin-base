@@ -5,7 +5,7 @@ pub(crate) mod config;
 pub use config::SlotAuthzConfig;
 
 pub(crate) mod oauth;
-pub use oauth::{Authenticator, OAuthConfig, SharedToken};
+pub use oauth::{Authenticator, OAuthConfig, SharedToken, decode_jwt_sub};
 
 pub mod middleware;
 

@@ -108,12 +108,18 @@ impl BuilderTxCache {
         let url = self.tx_cache.url().join(join)?;
         let secret = self.token.secret().await?;
 
-        self.tx_cache
+        let mut req = self
+            .tx_cache
             .client()
             .get(url)
             .query(&query)
-            .bearer_auth(secret)
-            .send()
+            .bearer_auth(&secret);
+
+        if let Some(sub) = crate::perms::oauth::decode_jwt_sub(&secret) {
+            req = req.header("x-jwt-claim-sub", sub);
+        }
+
+        req.send()
             .await?
             .error_for_status()?
             .json::<T>()
@@ -156,11 +162,13 @@ impl BuilderTxCache {
         let url = self.tx_cache.url().join(&url_path)?;
         let secret = self.token.secret().await?;
 
-        self.tx_cache
-            .client()
-            .get(url)
-            .bearer_auth(secret)
-            .send()
+        let mut req = self.tx_cache.client().get(url).bearer_auth(&secret);
+
+        if let Some(sub) = crate::perms::oauth::decode_jwt_sub(&secret) {
+            req = req.header("x-jwt-claim-sub", sub);
+        }
+
+        req.send()
             .await?
             .error_for_status()?
             .json::<CachedBundle>()

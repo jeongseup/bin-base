@@ -260,6 +260,16 @@ impl SharedToken {
             .to_owned())
     }
 
+    /// Extract the `sub` claim from the current JWT access token.
+    ///
+    /// Decodes the JWT payload (base64url) and extracts the `sub` field.
+    /// Returns `None` if the token is not yet available or the JWT cannot
+    /// be parsed.
+    pub async fn sub(&self) -> Option<String> {
+        let secret = self.secret().await.ok()?;
+        decode_jwt_sub(&secret)
+    }
+
     /// Wait for the token to be available, then get a reference to it.
     ///
     /// Holding this reference will block the background task from updating
@@ -379,6 +389,74 @@ impl<'a> TokenRef<'a> {
     pub fn scopes(&self) -> Option<&Vec<Scope>> {
         self.inner().scopes()
     }
+}
+
+/// Decode the `sub` claim from a JWT access token.
+///
+/// JWTs use base64url encoding (RFC 4648 §5) which replaces `+` with `-`
+/// and `/` with `_`, and omits padding. This function handles the
+/// conversion and extracts the `sub` field from the payload segment.
+pub fn decode_jwt_sub(token: &str) -> Option<String> {
+    let payload_b64url = token.split('.').nth(1)?;
+
+    // base64url → standard base64 with padding
+    let mut b64: String = payload_b64url
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    match b64.len() % 4 {
+        2 => b64.push_str("=="),
+        3 => b64.push('='),
+        _ => {}
+    }
+
+    let bytes = data_encoding_decode_base64(b64.as_bytes())?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    payload.get("sub")?.as_str().map(String::from)
+}
+
+/// Minimal base64 decoder (standard alphabet). Avoids adding an external
+/// base64 crate for a single use site.
+fn data_encoding_decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    const TABLE: [u8; 256] = {
+        let mut t = [0xFFu8; 256];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            t[(b'a' + i) as usize] = i + 26;
+            i += 1;
+        }
+        let mut i = 0u8;
+        while i < 10 {
+            t[(b'0' + i) as usize] = i + 52;
+            i += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+
+    let input: Vec<u8> = input.iter().copied().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for chunk in input.chunks(4) {
+        let mut buf = 0u32;
+        for (i, &b) in chunk.iter().enumerate() {
+            let val = TABLE[b as usize];
+            if val == 0xFF {
+                return None;
+            }
+            buf |= (val as u32) << (18 - 6 * i);
+        }
+        let bytes_in_chunk = chunk.len().saturating_sub(1);
+        for i in 0..bytes_in_chunk {
+            out.push((buf >> (16 - 8 * i)) as u8);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
